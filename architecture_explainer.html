@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chess Tutor Architecture</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #20201d;
+      --muted: #65645f;
+      --paper: #f8f7f1;
+      --panel: #ffffff;
+      --line: #d7d4c8;
+      --shadow: 0 18px 50px rgba(32, 32, 29, 0.12);
+      --teal: #0f766e;
+      --green: #28784b;
+      --amber: #b36b00;
+      --red: #ba3d2f;
+      --blue: #346cb0;
+      --violet: #7357a6;
+      --track: #ece8db;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        linear-gradient(135deg, rgba(15, 118, 110, 0.08), transparent 36%),
+        linear-gradient(315deg, rgba(179, 107, 0, 0.10), transparent 38%),
+        var(--paper);
+    }
+
+    .shell {
+      width: min(1180px, calc(100vw - 32px));
+      min-height: 100vh;
+      margin: 0 auto;
+      padding: 28px 0;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 18px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: end;
+      padding: 0 2px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 4vw, 48px);
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      margin: 10px 0 0;
+      max-width: 780px;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.55;
+    }
+
+    .controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: flex-end;
+    }
+
+    button {
+      appearance: none;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--ink);
+      min-width: 44px;
+      height: 40px;
+      border-radius: 8px;
+      padding: 0 14px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 5px 18px rgba(32, 32, 29, 0.08);
+    }
+
+    button:hover {
+      border-color: #a8a397;
+      transform: translateY(-1px);
+    }
+
+    button:focus-visible {
+      outline: 3px solid rgba(52, 108, 176, 0.25);
+      outline-offset: 2px;
+    }
+
+    button.primary {
+      background: var(--ink);
+      border-color: var(--ink);
+      color: white;
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 330px;
+      gap: 18px;
+      align-items: stretch;
+    }
+
+    .stage {
+      position: relative;
+      overflow: hidden;
+      height: clamp(520px, calc(100vh - 190px), 680px);
+      min-height: 520px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.78);
+      box-shadow: var(--shadow);
+    }
+
+    .diagram {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    .track {
+      fill: none;
+      stroke: var(--track);
+      stroke-width: 12;
+      stroke-linecap: round;
+    }
+
+    .flow-line {
+      fill: none;
+      stroke-width: 3;
+      stroke-linecap: round;
+      stroke-dasharray: 10 12;
+      animation: dash 1.4s linear infinite;
+      opacity: 0.8;
+    }
+
+    .node rect {
+      fill: var(--panel);
+      stroke: var(--line);
+      stroke-width: 1.5;
+      rx: 8;
+      filter: drop-shadow(0 12px 20px rgba(32, 32, 29, 0.10));
+    }
+
+    .node .title {
+      font-size: 18px;
+      font-weight: 800;
+      fill: var(--ink);
+      letter-spacing: 0;
+    }
+
+    .node .file {
+      font-size: 12px;
+      font-weight: 800;
+      fill: white;
+      letter-spacing: 0;
+    }
+
+    .node .body {
+      font-size: 13px;
+      fill: var(--muted);
+      letter-spacing: 0;
+    }
+
+    .badge {
+      rx: 8;
+      stroke: none;
+    }
+
+    .node rect.badge.teal { fill: var(--teal); }
+    .node rect.badge.blue { fill: var(--blue); }
+    .node rect.badge.red { fill: var(--red); }
+    .node rect.badge.green { fill: var(--green); }
+    .node rect.badge.amber { fill: var(--amber); }
+    .node rect.badge.violet { fill: var(--violet); }
+
+    .packet {
+      opacity: 0;
+      transform-box: fill-box;
+      transform-origin: center;
+    }
+
+    .packet circle {
+      fill: white;
+      stroke-width: 5;
+    }
+
+    .packet text {
+      font-size: 11px;
+      font-weight: 900;
+      fill: var(--ink);
+      dominant-baseline: central;
+      text-anchor: middle;
+      letter-spacing: 0;
+    }
+
+    .playing .packet-a { animation: packetA 8s linear infinite; }
+    .playing .packet-b { animation: packetB 8s linear infinite; }
+    .playing .packet-c { animation: packetC 8s linear infinite; }
+    .playing .packet-d { animation: packetD 8s linear infinite; }
+    .playing .packet-e { animation: packetE 8s linear infinite; }
+
+    .truth-ring {
+      fill: none;
+      stroke-width: 3;
+      stroke-dasharray: 4 8;
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: spin 14s linear infinite;
+      opacity: 0.72;
+    }
+
+    .side {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 12px;
+      height: clamp(520px, calc(100vh - 190px), 680px);
+      min-height: 520px;
+    }
+
+    .readout,
+    .legend {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.84);
+      box-shadow: 0 14px 35px rgba(32, 32, 29, 0.10);
+    }
+
+    .readout {
+      padding: 18px;
+    }
+
+    .step-label {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 0 10px;
+      border-radius: 8px;
+      background: var(--ink);
+      color: white;
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .readout h2 {
+      margin: 14px 0 10px;
+      font-size: 24px;
+      line-height: 1.1;
+      letter-spacing: 0;
+    }
+
+    .readout p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+      font-size: 15px;
+    }
+
+    .legend {
+      padding: 14px;
+    }
+
+    .legend h3 {
+      margin: 0 0 12px;
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+
+    .legend-list {
+      display: grid;
+      gap: 9px;
+    }
+
+    .legend-item {
+      display: grid;
+      grid-template-columns: 12px minmax(0, 1fr);
+      gap: 9px;
+      align-items: start;
+      color: var(--muted);
+      line-height: 1.35;
+      font-size: 13px;
+    }
+
+    .dot {
+      width: 12px;
+      height: 12px;
+      margin-top: 3px;
+      border-radius: 50%;
+      background: var(--teal);
+    }
+
+    .dot.blue { background: var(--blue); }
+    .dot.green { background: var(--green); }
+    .dot.amber { background: var(--amber); }
+    .dot.red { background: var(--red); }
+    .dot.violet { background: var(--violet); }
+
+    .timeline {
+      position: absolute;
+      left: 22px;
+      right: 22px;
+      bottom: 20px;
+      height: 68px;
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 8px;
+      align-items: end;
+      pointer-events: none;
+    }
+
+    .tick {
+      height: 44px;
+      border-top: 4px solid var(--line);
+      padding-top: 8px;
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 800;
+      letter-spacing: 0;
+      transition: border-color 180ms ease, color 180ms ease;
+    }
+
+    .tick.active {
+      border-color: var(--red);
+      color: var(--ink);
+    }
+
+    @keyframes dash {
+      to { stroke-dashoffset: -22; }
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    @keyframes packetA {
+      0%, 3% { opacity: 0; transform: translate(110px, 108px) scale(0.8); }
+      8%, 14% { opacity: 1; transform: translate(286px, 108px) scale(1); }
+      18%, 100% { opacity: 0; transform: translate(286px, 108px) scale(0.8); }
+    }
+
+    @keyframes packetB {
+      0%, 17% { opacity: 0; transform: translate(420px, 108px) scale(0.8); }
+      24%, 30% { opacity: 1; transform: translate(420px, 285px) scale(1); }
+      34%, 100% { opacity: 0; transform: translate(420px, 285px) scale(0.8); }
+    }
+
+    @keyframes packetC {
+      0%, 33% { opacity: 0; transform: translate(545px, 330px) scale(0.8); }
+      40%, 48% { opacity: 1; transform: translate(700px, 330px) scale(1); }
+      52%, 100% { opacity: 0; transform: translate(700px, 330px) scale(0.8); }
+    }
+
+    @keyframes packetD {
+      0%, 51% { opacity: 0; transform: translate(695px, 420px) scale(0.8); }
+      58%, 68% { opacity: 1; transform: translate(470px, 430px) scale(1); }
+      72%, 100% { opacity: 0; transform: translate(470px, 430px) scale(0.8); }
+    }
+
+    @keyframes packetE {
+      0%, 71% { opacity: 0; transform: translate(350px, 432px) scale(0.8); }
+      78%, 92% { opacity: 1; transform: translate(170px, 515px) scale(1); }
+      98%, 100% { opacity: 0; transform: translate(170px, 515px) scale(0.8); }
+    }
+
+    .paused * {
+      animation-play-state: paused !important;
+    }
+
+    @media (max-width: 980px) {
+      header,
+      main {
+        grid-template-columns: 1fr;
+      }
+
+      .controls {
+        justify-content: flex-start;
+      }
+
+      .stage,
+      .side {
+        height: auto;
+        min-height: auto;
+      }
+
+      .stage {
+        aspect-ratio: 1 / 1;
+      }
+
+      .side {
+        grid-template-rows: auto auto;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .shell {
+        width: min(100vw - 20px, 1180px);
+        padding: 16px 0;
+      }
+
+      .stage {
+        aspect-ratio: 1.32 / 1;
+      }
+
+      .timeline {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div>
+        <h1>Chess Tutor Architecture</h1>
+        <p class="subtitle">The app works because the model is only the narrator. The board, legal moves, evaluations, and concrete facts come from deterministic tools.</p>
+      </div>
+      <div class="controls" aria-label="Animation controls">
+        <button id="prev" type="button" title="Go to the previous architecture step" aria-label="Previous step">&larr;</button>
+        <button class="primary" id="play" type="button" title="Play or pause the animation">Pause</button>
+        <button id="next" type="button" title="Go to the next architecture step" aria-label="Next step">&rarr;</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="stage playing" id="stage" aria-label="Animated architecture diagram">
+        <svg class="diagram" viewBox="0 0 900 680" role="img" aria-labelledby="diagramTitle diagramDesc">
+          <title id="diagramTitle">Animated chess tutor architecture diagram</title>
+          <desc id="diagramDesc">A PGN flows into session state. Gemini calls tools. Tools query python-chess, Stockfish, and facts. The grounded result flows back to Gemini and becomes the answer.</desc>
+
+          <path class="track" d="M130 128 C220 105 265 105 335 128" />
+          <path class="track" d="M430 170 C430 220 430 250 430 300" />
+          <path class="track" d="M520 345 C600 328 655 328 735 345" />
+          <path class="track" d="M735 420 C650 450 545 450 460 420" />
+          <path class="track" d="M365 420 C305 430 245 455 180 495" />
+
+          <path class="flow-line" stroke="var(--teal)" d="M130 128 C220 105 265 105 335 128" />
+          <path class="flow-line" stroke="var(--blue)" d="M430 170 C430 220 430 250 430 300" />
+          <path class="flow-line" stroke="var(--red)" d="M520 345 C600 328 655 328 735 345" />
+          <path class="flow-line" stroke="var(--green)" d="M735 420 C650 450 545 450 460 420" />
+          <path class="flow-line" stroke="var(--amber)" d="M365 420 C305 430 245 455 180 495" />
+
+          <g class="node">
+            <rect x="38" y="70" width="180" height="116" />
+            <rect class="badge teal" x="58" y="92" width="78" height="24" />
+            <text class="file" x="97" y="109" text-anchor="middle">PGN</text>
+            <text class="title" x="58" y="142">Your game</text>
+            <text class="body" x="58" y="164">sample.pgn or pasted text</text>
+          </g>
+
+          <g class="node">
+            <rect x="310" y="70" width="235" height="116" />
+            <rect class="badge blue" x="330" y="92" width="92" height="24" />
+            <text class="file" x="376" y="109" text-anchor="middle">session.py</text>
+            <text class="title" x="330" y="142">SessionState</text>
+            <text class="body" x="330" y="164">mainline, current board, branches</text>
+          </g>
+
+          <g class="node">
+            <rect x="310" y="300" width="235" height="130" />
+            <rect class="badge red" x="330" y="322" width="74" height="24" />
+            <text class="file" x="367" y="339" text-anchor="middle">tools.py</text>
+            <text class="title" x="330" y="372">Tool gate</text>
+            <text class="body" x="330" y="394">explain, analyze, what-if</text>
+            <text class="body" x="330" y="414">the model cannot bypass this</text>
+          </g>
+
+          <g class="node">
+            <rect x="664" y="285" width="198" height="166" />
+            <rect class="badge green" x="684" y="307" width="104" height="24" />
+            <text class="file" x="736" y="324" text-anchor="middle">engine.py</text>
+            <text class="title" x="684" y="358">Chess truth</text>
+            <text class="body" x="684" y="382">Stockfish scores</text>
+            <text class="body" x="684" y="404">python-chess legality</text>
+            <text class="body" x="684" y="426">features.py facts</text>
+            <circle class="truth-ring" cx="764" cy="368" r="76" stroke="var(--green)" />
+          </g>
+
+          <g class="node">
+            <rect x="62" y="445" width="235" height="112" />
+            <rect class="badge amber" x="82" y="465" width="72" height="24" />
+            <text class="file" x="118" y="482" text-anchor="middle">Gemini</text>
+            <text class="title" x="82" y="515">Tutor answer</text>
+            <text class="body" x="82" y="537">plain English explanation</text>
+            <text class="body" x="82" y="552">using returned facts only</text>
+          </g>
+
+          <g class="node">
+            <rect x="356" y="458" width="178" height="94" />
+            <rect class="badge violet" x="376" y="478" width="72" height="24" />
+            <text class="file" x="412" y="495" text-anchor="middle">tutor.py</text>
+            <text class="title" x="376" y="527">GeminiTutor</text>
+            <text class="body" x="376" y="546">manual tool loop</text>
+          </g>
+
+          <g class="packet packet-a">
+            <circle cx="0" cy="0" r="22" stroke="var(--teal)" />
+            <text x="0" y="1">PGN</text>
+          </g>
+          <g class="packet packet-b">
+            <circle cx="0" cy="0" r="22" stroke="var(--blue)" />
+            <text x="0" y="1">ASK</text>
+          </g>
+          <g class="packet packet-c">
+            <circle cx="0" cy="0" r="22" stroke="var(--red)" />
+            <text x="0" y="1">CALL</text>
+          </g>
+          <g class="packet packet-d">
+            <circle cx="0" cy="0" r="22" stroke="var(--green)" />
+            <text x="0" y="1">FACT</text>
+          </g>
+          <g class="packet packet-e">
+            <circle cx="0" cy="0" r="22" stroke="var(--amber)" />
+            <text x="0" y="1">WHY</text>
+          </g>
+        </svg>
+
+        <div class="timeline" aria-hidden="true">
+          <div class="tick active" data-tick="0">1. Load game</div>
+          <div class="tick" data-tick="1">2. Track board</div>
+          <div class="tick" data-tick="2">3. Tool call</div>
+          <div class="tick" data-tick="3">4. Engine facts</div>
+          <div class="tick" data-tick="4">5. Return facts</div>
+          <div class="tick" data-tick="5">6. Explain why</div>
+        </div>
+      </section>
+
+      <aside class="side">
+        <section class="readout" aria-live="polite">
+          <span class="step-label" id="stepLabel">Step 1</span>
+          <h2 id="stepTitle">Load the game</h2>
+          <p id="stepBody">A PGN enters through tutor.py. python-chess parses it, then SessionState stores every real move and starts the current board at the opening position.</p>
+        </section>
+
+        <section class="legend">
+          <h3>Files in the loop</h3>
+          <div class="legend-list">
+            <div class="legend-item"><span class="dot"></span><span><strong>PGN</strong>: the user game being reviewed.</span></div>
+            <div class="legend-item"><span class="dot blue"></span><span><strong>session.py</strong>: board position, mainline, branches, cache.</span></div>
+            <div class="legend-item"><span class="dot red"></span><span><strong>tools.py</strong>: controlled API the model can call.</span></div>
+            <div class="legend-item"><span class="dot green"></span><span><strong>engine.py</strong> and <strong>features.py</strong>: Stockfish judgment plus factual board features.</span></div>
+            <div class="legend-item"><span class="dot violet"></span><span><strong>tutor.py</strong>: Gemini adapter and manual tool loop.</span></div>
+            <div class="legend-item"><span class="dot amber"></span><span><strong>Answer</strong>: Gemini explains only what the tools returned.</span></div>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <script>
+    const stage = document.querySelector("#stage");
+    const playButton = document.querySelector("#play");
+    const prevButton = document.querySelector("#prev");
+    const nextButton = document.querySelector("#next");
+    const stepLabel = document.querySelector("#stepLabel");
+    const stepTitle = document.querySelector("#stepTitle");
+    const stepBody = document.querySelector("#stepBody");
+    const ticks = [...document.querySelectorAll(".tick")];
+
+    const steps = [
+      {
+        title: "Load the game",
+        body: "A PGN enters through tutor.py. python-chess parses it, then SessionState stores every real move and starts the current board at the opening position."
+      },
+      {
+        title: "Keep board state honest",
+        body: "session.py owns the current board, the mainline SAN list, and safe what-if branches. Real game moves stay read-only."
+      },
+      {
+        title: "Gemini asks for evidence",
+        body: "The model cannot inspect the board directly. It must call tools like explain_move, analyze, goto_move, or play_move."
+      },
+      {
+        title: "Tools query chess truth",
+        body: "tools.py asks Stockfish for best lines, python-chess for legality, and features.py for facts like material, checks, hanging pieces, and pawn structure."
+      },
+      {
+        title: "Facts return to the model",
+        body: "The tool result includes the position, engine verdict, concrete move consequences, and factual before-and-after details."
+      },
+      {
+        title: "The tutor explains why",
+        body: "Gemini turns the grounded data into plain English: verdict first, then the concrete reason, then the reusable chess principle."
+      }
+    ];
+
+    let currentStep = 0;
+    let playing = true;
+    let cycleStart = performance.now();
+    let pausedAt = null;
+    const cycleMs = 8000;
+    const stepMs = cycleMs / steps.length;
+
+    function renderStep(index) {
+      currentStep = (index + steps.length) % steps.length;
+      const step = steps[currentStep];
+      stepLabel.textContent = `Step ${currentStep + 1}`;
+      stepTitle.textContent = step.title;
+      stepBody.textContent = step.body;
+      ticks.forEach((tick, i) => tick.classList.toggle("active", i === currentStep));
+    }
+
+    function setPlayback(nextPlaying) {
+      if (playing === nextPlaying) return;
+      playing = nextPlaying;
+      if (playing) {
+        const pausedFor = performance.now() - pausedAt;
+        cycleStart += pausedFor;
+        pausedAt = null;
+      } else {
+        pausedAt = performance.now();
+      }
+      stage.classList.toggle("paused", !playing);
+      playButton.textContent = playing ? "Pause" : "Play";
+    }
+
+    function togglePlay() {
+      setPlayback(!playing);
+    }
+
+    function jumpToStep(index) {
+      setPlayback(false);
+      renderStep(index);
+      cycleStart = performance.now() - currentStep * stepMs;
+      pausedAt = performance.now();
+    }
+
+    function updateFromAnimationClock(now) {
+      if (playing) {
+        const elapsed = (now - cycleStart) % cycleMs;
+        const stepIndex = Math.floor(elapsed / stepMs);
+        if (stepIndex !== currentStep) renderStep(stepIndex);
+      }
+      requestAnimationFrame(updateFromAnimationClock);
+    }
+
+    playButton.addEventListener("click", togglePlay);
+    prevButton.addEventListener("click", () => jumpToStep(currentStep - 1));
+    nextButton.addEventListener("click", () => jumpToStep(currentStep + 1));
+    requestAnimationFrame(updateFromAnimationClock);
+  </script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+[Event "Sample game for chess-tutor MVP"]
+[Site "?"]
+[Date "2026.06.15"]
+[Round "?"]
+[White "Player A"]
+[Black "Player B"]
+[Result "0-1"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. O-O Nf6 5. d3 d6 6. Bg5 Bg4
+7. Nbd2 Nd4 8. Bxf6 gxf6 9. Nxd4 Bxd1 10. Raxd1 0-1
