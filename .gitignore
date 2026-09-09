@@ -1,7 +1,30 @@
+# Python environments and generated files
 .venv/
+venv/
 __pycache__/
-*.pyc
+*.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Local configuration and secrets (only the blank example is shared)
 .env
+.env.*
+!.env.example
+*.env
+*.pem
+*.key
+credentials.json
+credentials-*.json
+*service-account*.json
+secrets/
+
+# Machine-specific files
 .DS_Store
+*.log
 .claude/settings.local.json

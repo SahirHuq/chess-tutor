@@ -88,11 +88,28 @@ Knowing these lets you write new tools/features without re-reading every file.
  "material_before","material_after","material_swing_white_minus_black"}
 
 # features.positional_changes(before, after) -> list[str]
-# e.g. ["white gave up the bishop pair", "black now has doubled pawns on the b-file"]
+# named, verifiable deltas spanning the engine's eval factors: material/structure
+# (bishop pair, doubled/isolated/backward pawns), pieces (rook on open file, knight
+# outpost, trapped piece), activity (fewer active moves), centre control, and king
+# safety (exposure, lost shield pawn). e.g.
+# ["white gave up the bishop pair", "black now has a backward pawn on f6",
+#  "black's rook now controls the open h-file", "white's knight lost its outpost (d5)"]
+# Sharp tactics (forks/pins/hung pieces) live in tactics.move_tactics, not here.
+
+# features.positional_features(board) — the ABSOLUTE positional snapshot (not a delta),
+# both sides, that powers explain_position. Keys: bishop_pair, doubled/isolated/backward/
+# connected/passed_pawns, rooks_on_open_files, knight_outposts, trapped_pieces (side to
+# move only), king_safety, mobility, developed_minors, center_control.
 
 # tools._evaluate_candidate(...) — the shared per-move verdict core
 {"move","verdict","centipawns_lost","played_engine_best","move_does",
+ "tactics",          # named motifs the move makes: forks / pins / pieces it hangs
  "consequence","position_changes","engine_after","facts_after","value_white_after"}
+
+# tactics.move_tactics(before_board, move) -> list[str]
+# verifiable sharp motifs the move creates, e.g.
+# ["the knight on c6 forks the queen on d8 and the rook on a7",
+#  "leaves the bishop on d1 hanging (attacked and undefended)"]
 ```
 
 Engine defaults (`engine.py`): depth 18, multipv 3, PV shown 8 plies.
@@ -130,6 +147,15 @@ objects only — no session coupling. Change a move's analysis there, not in two
 places. `_recommended_plan` (the engine's own best line) is likewise shared.
 `explain_move`'s return-dict keys are referenced verbatim by the system prompt in
 `tutor.py` — preserve them when refactoring.
+
+`explain_position` (no args, current board) is the "reason freely" tool for
+open-ended/conceptual questions ("what are the imbalances?", "was I too passive?").
+It hands the model the *complete grounded snapshot* — engine eval + best lines,
+material/hanging facts, and the full `features.positional_features` for both sides —
+and the prompt lets the model synthesise from it, with the hard rule that every
+concrete claim (move/eval/square/piece) must trace to that snapshot. This is how the
+system answers concepts we never hand-named, without re-opening the hallucination
+door: the engine still supplies all truth; the model only interprets it.
 
 ## The model loop (`tutor.py`)
 

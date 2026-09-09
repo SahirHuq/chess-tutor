@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chess Tutor</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">♟ Chess Tutor</span>
+    <span id="badges" class="badges"></span>
+  </header>
+
+  <!-- 1. Loader -->
+  <section id="loader" class="screen">
+    <div class="card">
+      <h1>Load a game to review</h1>
+      <p class="muted">Paste a PGN (a Lichess or Chess.com export works), or try the sample.</p>
+      <textarea id="pgn-input" placeholder="[Event &quot;...&quot;]&#10;1. e4 e5 2. Nf3 ..."></textarea>
+      <div id="loader-error" class="error" hidden></div>
+      <div class="row">
+        <button id="load-game" class="primary">Load game</button>
+        <button id="load-sample" class="ghost">Load sample game</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. Colour select -->
+  <section id="color-select" class="screen" hidden>
+    <div class="card">
+      <h1>Which side did you play?</h1>
+      <p id="color-meta" class="muted"></p>
+      <div class="row">
+        <button id="pick-white" class="color-btn">Played White</button>
+        <button id="pick-black" class="color-btn">Played Black</button>
+      </div>
+      <button id="back-to-loader" class="link">← load a different game</button>
+    </div>
+  </section>
+
+  <!-- 3. Review -->
+  <section id="review" class="screen review-grid" hidden>
+    <div class="board-col">
+      <div id="board" class="board"></div>
+      <div class="nav">
+        <button data-nav="start" title="Start">⏮</button>
+        <button data-nav="prev" title="Previous">◀</button>
+        <button data-nav="next" title="Next">▶</button>
+        <button data-nav="end" title="End">⏭</button>
+      </div>
+      <div id="board-info" class="board-info"></div>
+    </div>
+
+    <div class="moves-col">
+      <div class="panel-title">Moves</div>
+      <div id="move-list" class="move-list"></div>
+    </div>
+
+    <div class="chat-col">
+      <div class="panel-title">Ask the tutor</div>
+      <div class="quick" id="quick-questions">
+        <button data-q="Where did I go wrong?">Where did I go wrong?</button>
+        <button data-q="What was my biggest mistake?">Biggest mistake?</button>
+        <button data-q="What did my opponent miss?">Opponent's miss?</button>
+        <button data-q="What was the turning point?">Turning point?</button>
+        <button data-q="__explain__">Explain this move</button>
+      </div>
+      <div id="chat-history" class="chat-history"></div>
+      <form id="chat-form" class="chat-input">
+        <input id="chat-text" type="text" placeholder="Ask anything about the game…" autocomplete="off" />
+        <button type="submit" class="primary" id="send-btn">Send</button>
+      </form>
+    </div>
+  </section>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

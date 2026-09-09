@@ -16,6 +16,7 @@ from typing import Optional
 import chess
 
 import features
+import tactics
 from engine import Analysis, Engine
 from session import SessionState
 
@@ -112,6 +113,46 @@ def analyze() -> dict:
         "position": ctx.session.orientation(),
         "engine": analysis,
         "facts": ctx.session.current_facts(),
+    }
+
+
+def explain_position() -> dict:
+    """Get the COMPLETE grounded picture of the CURRENT position — use this for
+    OPEN-ENDED, CONCEPTUAL questions that do NOT name a single move and are NOT about
+    finding a mistake: "is my position better or worse, and why?", "what are the
+    imbalances here?", "was I playing too passively?", "is my bishop good or bad?",
+    "what should my plan be?", "what are the weaknesses in this position?". First call
+    goto_move(ply) if the user means a specific point in the game.
+
+    Returns, all for this one position:
+      - `engine`: the evaluation and the top candidate moves with their lines (who is
+        better, and the best plan) — use it for "who's better" and "what to play",
+      - `facts`: material balance, hanging pieces, checks, castling rights,
+      - `features`: the positional CHARACTER for BOTH sides — bishop pair; pawn
+        structure (doubled / isolated / backward / connected / passed pawns); rooks on
+        open files; knight outposts; trapped pieces; king safety; piece activity
+        (`mobility`); development; and centre control.
+    REASON over all of it and TEACH: connect the facts into an explanation the player
+    can learn from (e.g. "you have the bishop pair and more space and your opponent has
+    a backward d-pawn, so keep the position open and pressure that pawn"). You may draw
+    conclusions the data supports even if no single field is named for them — BUT every
+    CONCRETE claim (a specific move, an evaluation, a square, a piece, a capture) must
+    come from this snapshot. Never invent a move or eval, and never describe a square or
+    piece the data does not mention.
+    """
+    ctx = _ctx()
+    board = ctx.session.current
+    fen = board.fen()
+    analysis = ctx.session.analysis_cache.get(fen)
+    if analysis is None:
+        analysis = ctx.engine.analyse(board).to_dict()
+        ctx.session.analysis_cache[fen] = analysis
+    _log(f"explain_position() -> {_eval_summary(analysis)}")
+    return {
+        "position": ctx.session.orientation(),
+        "engine": analysis,
+        "facts": ctx.session.current_facts(),
+        "features": features.positional_features(board),
     }
 
 
@@ -278,6 +319,9 @@ def _evaluate_candidate(
         "centipawns_lost": quality["centipawns_lost"],
         "played_engine_best": played_the_best,
         "move_does": actual_does,
+        # Named, verifiable tactics the move creates (forks, pins, pieces it hangs) —
+        # the sharp "why", complementing the slower positional deltas below.
+        "tactics": tactics.move_tactics(before_board, move),
         "consequence": consequence,
         "position_changes": position_changes,
         "engine_after": after_engine,
@@ -299,6 +343,9 @@ def explain_move(move: str) -> dict:
         engine's intended line annotated with exactly what it captures/attacks —
         and `achieves`; use this to teach the IDEA behind the right move precisely,
       - `actual_move_does`: whether the played move captures/gives check,
+      - `tactics`: named, verifiable tactics the move creates — a fork, a pin, or a
+        piece it leaves hanging (empty when the move makes no concrete tactic); this
+        is the sharp reason a move wins or loses material,
       - `consequence`: the move + the opponent's best reply, annotated with
         captures and the NET material result (an equal trade nets to zero),
       - `position_changes`: positional things the move changed (e.g. "White gave
@@ -339,6 +386,7 @@ def explain_move(move: str) -> dict:
         "centipawns_lost": candidate["centipawns_lost"],
         "actual_move": candidate["move"],
         "actual_move_does": candidate["move_does"],
+        "tactics": candidate["tactics"],
         "played_engine_best": candidate["played_engine_best"],
         "engine_recommended": best_list[0] if best_list else None,
         "recommended_plan": recommended_plan,
@@ -456,8 +504,8 @@ def find_eval_swings(
 
     Returns `swings`: the worst `max_results` (1-3) moves, BIGGEST drop first. Each
     entry has the SAME fields as explain_move — `verdict`, `centipawns_lost`,
-    `engine_recommended`, `recommended_plan`, `actual_move_does`, `consequence`,
-    `position_changes`, `facts_before`/`facts_after`, plus `move_label` (e.g.
+    `engine_recommended`, `recommended_plan`, `actual_move_does`, `tactics`,
+    `consequence`, `position_changes`, `facts_before`/`facts_after`, plus `move_label` (e.g.
     "18.Nxd4"), `ply`, `side` (white/black), and `eval_before_white_cp`/
     `eval_after_white_cp` (White's POV) — so present each swing exactly as you would
     a single explained move, and lead with the biggest one. `scanned.scope` echoes
@@ -511,6 +559,7 @@ def find_eval_swings(
                 "centipawns_lost": candidate["centipawns_lost"],
                 "actual_move": candidate["move"],
                 "actual_move_does": candidate["move_does"],
+                "tactics": candidate["tactics"],
                 "played_engine_best": candidate["played_engine_best"],
                 "engine_recommended": best_list[0] if best_list else None,
                 "recommended_plan": _recommended_plan(board, before_analysis, best_list),
@@ -594,8 +643,9 @@ def compare_moves(move_a: str, move_b: str) -> dict:
     Both moves are scored from the SAME position, so the comparison is fair. The
     result has, for EACH move (`move_a`, `move_b`): a `verdict` (best move / good
     move / inaccuracy / mistake / blunder), `centipawns_lost` vs the engine's best,
-    `move_does` (what it captures / whether it checks), `consequence` (the move +
-    the opponent's best reply with the NET material result), and `position_changes`
+    `move_does` (what it captures / whether it checks), `tactics` (any fork / pin /
+    hung piece the move creates), `consequence` (the move + the opponent's best reply
+    with the NET material result), and `position_changes`
     (what it changed positionally). It also returns `comparison.better_move` and
     `comparison.centipawn_gap` (how much better, from the mover's point of view) and
     `engine_best` — the engine's own top pick here with its plan, in case NEITHER
@@ -678,4 +728,7 @@ def go_back() -> dict:
 
 
 # The exact list handed to google-genai as `config.tools`.
-ALL_TOOLS = [explain_move, compare_moves, find_eval_swings, goto_move, analyze, play_move, go_back]
+ALL_TOOLS = [
+    explain_move, compare_moves, find_eval_swings, explain_position,
+    goto_move, analyze, play_move, go_back,
+]

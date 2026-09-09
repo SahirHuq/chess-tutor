@@ -139,6 +139,102 @@ def passed_pawns(board: chess.Board, color: chess.Color) -> list[str]:
     return sorted(out)
 
 
+def _square_attacked_by_pawn(board: chess.Board, square: int, by_color: chess.Color) -> bool:
+    """Would a `by_color` pawn capture on `square`? (Used for 'can't advance safely'.)"""
+    return any(
+        (p := board.piece_at(a)) is not None and p.piece_type == chess.PAWN
+        for a in board.attackers(by_color, square)
+    )
+
+
+def connected_pawns(board: chess.Board, color: chess.Color) -> list[str]:
+    """Pawns that are part of a healthy chain: a friendly pawn beside them (a phalanx)
+    or one defending/defended diagonally. Connected pawns support each other and each
+    other's advance — the opposite of the isolated/doubled/backward weaknesses."""
+    pawn_set = set(board.pieces(chess.PAWN, color))
+    out: list[str] = []
+    for sq in pawn_set:
+        f, r = chess.square_file(sq), chess.square_rank(sq)
+        neighbours = [
+            chess.square(f + df, r + dr)
+            for df in (-1, 1)
+            for dr in (-1, 0, 1)
+            if 0 <= f + df < 8 and 0 <= r + dr < 8
+        ]
+        if any(n in pawn_set for n in neighbours):
+            out.append(chess.square_name(sq))
+    return sorted(out)
+
+
+def backward_pawns(board: chess.Board, color: chess.Color) -> list[str]:
+    """Pawns left behind their neighbours: there ARE friendly pawns on adjacent files
+    (so it isn't merely isolated), but all of them have advanced past it, so none can
+    defend it — and the square in front is covered by an enemy pawn, so it can't
+    advance safely either. A classic long-term weakness the engine penalises."""
+    own = list(board.pieces(chess.PAWN, color))
+    out: list[str] = []
+    for sq in own:
+        f, r = chess.square_file(sq), chess.square_rank(sq)
+        neighbours = [p for p in own if abs(chess.square_file(p) - f) == 1]
+        if not neighbours:  # no neighbours at all -> isolated, not backward
+            continue
+        if color == chess.WHITE:
+            if any(chess.square_rank(p) <= r for p in neighbours):  # one can still support it
+                continue
+            stop = chess.square(f, r + 1) if r + 1 <= 7 else None
+        else:
+            if any(chess.square_rank(p) >= r for p in neighbours):
+                continue
+            stop = chess.square(f, r - 1) if r - 1 >= 0 else None
+        if stop is not None and _square_attacked_by_pawn(board, stop, not color):
+            out.append(chess.square_name(sq))
+    return sorted(out)
+
+
+def is_trapped(board: chess.Board, square: int) -> bool:
+    """Is the piece on `square` trapped — attacked by a cheaper enemy piece, with no
+    move to a square where it isn't again attacked by something cheaper or a pawn?
+    Only assessable for the side to move (it needs that piece's own moves), so we
+    return False otherwise — never a guess. Conservative on purpose: when it fires,
+    the piece really is losing material with nowhere to run."""
+    piece = board.piece_at(square)
+    if piece is None or piece.piece_type in (chess.PAWN, chess.KING):
+        return False
+    if board.turn != piece.color:  # can't generate this piece's moves when it isn't its turn
+        return False
+    value = PIECE_VALUES[piece.piece_type]
+    attacked_by_cheaper = any(
+        PIECE_VALUES.get((p := board.piece_at(a)) and p.piece_type, 99) < value
+        for a in board.attackers(not piece.color, square)
+    )
+    if not attacked_by_cheaper:
+        return False
+    for move in board.legal_moves:
+        if move.from_square != square:
+            continue
+        after = board.copy()
+        after.push(move)
+        dest = move.to_square
+        cheaper_attacker = any(
+            PIECE_VALUES.get((p := after.piece_at(a)) and p.piece_type, 99) < value
+            for a in after.attackers(not piece.color, dest)
+        )
+        if not cheaper_attacker and not _square_attacked_by_pawn(after, dest, not piece.color):
+            return False  # found a safe escape
+    return True
+
+
+def trapped_pieces(board: chess.Board, color: chess.Color) -> list[str]:
+    """Squares of `color`'s trapped minor/major pieces (only when it's `color`'s turn)."""
+    if board.turn != color:
+        return []
+    return sorted(
+        chess.square_name(sq)
+        for sq, piece in board.piece_map().items()
+        if piece.color == color and is_trapped(board, sq)
+    )
+
+
 _MINOR_HOME = {
     chess.WHITE: {chess.B1, chess.G1, chess.C1, chess.F1},
     chess.BLACK: {chess.B8, chess.G8, chess.C8, chess.F8},
@@ -163,6 +259,63 @@ def center_control(board: chess.Board, color: chess.Color) -> int:
             score += 1
         score += len(board.attackers(color, sq))
     return score
+
+
+def rooks_on_open_files(board: chess.Board, color: chess.Color) -> dict[str, str]:
+    """Files where `color` has a rook with no friendly pawn in the way, labelled
+    'open' (no pawns of either side) or 'semi-open' (only enemy pawns). Active rooks
+    are one of the clearest reasons an evaluation shifts — an open file is a highway."""
+    own = set(_pawn_files(board, color))
+    enemy = set(_pawn_files(board, not color))
+    result: dict[str, str] = {}
+    for sq in board.pieces(chess.ROOK, color):
+        f = chess.square_file(sq)
+        if f in own:  # a friendly pawn blocks the file — not (semi-)open for this rook
+            continue
+        result[chr(ord("a") + f)] = "open" if f not in enemy else "semi-open"
+    return result
+
+
+def _defended_by_pawn(board: chess.Board, square: int, color: chess.Color) -> bool:
+    return any(
+        (p := board.piece_at(a)) is not None and p.piece_type == chess.PAWN
+        for a in board.attackers(color, square)
+    )
+
+
+def _enemy_pawn_can_challenge(
+    board: chess.Board, file: int, rank: int, color: chess.Color
+) -> bool:
+    """Could an enemy pawn ever advance to chase a `color` piece on (file, rank)?
+    True if an enemy pawn sits on an adjacent file, still ahead of the square — which
+    means the square is not a true hole and a knight there is not a stable outpost."""
+    for sq in board.pieces(chess.PAWN, not color):
+        if abs(chess.square_file(sq) - file) != 1:
+            continue
+        pr = chess.square_rank(sq)
+        if color == chess.WHITE and pr > rank:  # black pawn above, can come down
+            return True
+        if color == chess.BLACK and pr < rank:  # white pawn below, can come up
+            return True
+    return False
+
+
+def knight_outposts(board: chess.Board, color: chess.Color) -> list[str]:
+    """Squares of `color`'s knights that sit on a true outpost: advanced into enemy
+    territory, defended by a friendly pawn, and on a hole no enemy pawn can attack.
+    A knight like this is often worth more than a bishop — a durable, grounded plus."""
+    enemy_ranks = (3, 4, 5) if color == chess.WHITE else (2, 3, 4)  # 4th–6th from the owner
+    out: list[str] = []
+    for sq in board.pieces(chess.KNIGHT, color):
+        f, r = chess.square_file(sq), chess.square_rank(sq)
+        if r not in enemy_ranks:
+            continue
+        if not _defended_by_pawn(board, sq, color):
+            continue
+        if _enemy_pawn_can_challenge(board, f, r, color):
+            continue
+        out.append(chess.square_name(sq))
+    return sorted(out)
 
 
 def king_safety(board: chess.Board, color: chess.Color) -> dict:
@@ -204,38 +357,33 @@ def mobility(board: chess.Board) -> dict:
     return {"white": other, "black": side_to_move}
 
 
+def _both(fn, board: chess.Board) -> dict:
+    """Run a per-colour feature for White and Black: {'white': ..., 'black': ...}."""
+    return {"white": fn(board, chess.WHITE), "black": fn(board, chess.BLACK)}
+
+
 def positional_features(board: chess.Board) -> dict:
-    """All positional facts for a position, as a plain JSON-able dict."""
+    """The full positional *character* of a position, for BOTH sides, as a plain
+    JSON-able dict — the complete grounded snapshot the tutor reasons over for
+    open-ended questions ("what are the imbalances?", "was I too passive?"). Every
+    value is a verifiable fact (a count, a list of squares, a bool), so the model can
+    interpret the position without us having to pre-name each concept it might raise.
+    Ordered the way the engine weighs them: material/imbalance, pawns, pieces, king
+    safety, activity, centre."""
     return {
-        "bishop_pair": {
-            "white": has_bishop_pair(board, chess.WHITE),
-            "black": has_bishop_pair(board, chess.BLACK),
-        },
-        "doubled_pawns": {
-            "white": doubled_pawn_files(board, chess.WHITE),
-            "black": doubled_pawn_files(board, chess.BLACK),
-        },
-        "isolated_pawns": {
-            "white": isolated_pawns(board, chess.WHITE),
-            "black": isolated_pawns(board, chess.BLACK),
-        },
-        "passed_pawns": {
-            "white": passed_pawns(board, chess.WHITE),
-            "black": passed_pawns(board, chess.BLACK),
-        },
-        "king_safety": {
-            "white": king_safety(board, chess.WHITE),
-            "black": king_safety(board, chess.BLACK),
-        },
+        "bishop_pair": _both(has_bishop_pair, board),
+        "doubled_pawns": _both(doubled_pawn_files, board),
+        "isolated_pawns": _both(isolated_pawns, board),
+        "backward_pawns": _both(backward_pawns, board),
+        "connected_pawns": _both(connected_pawns, board),
+        "passed_pawns": _both(passed_pawns, board),
+        "rooks_on_open_files": _both(rooks_on_open_files, board),
+        "knight_outposts": _both(knight_outposts, board),
+        "trapped_pieces": _both(trapped_pieces, board),  # only the side to move is assessable
+        "king_safety": _both(king_safety, board),
         "mobility": mobility(board),
-        "developed_minors": {
-            "white": developed_minors(board, chess.WHITE),
-            "black": developed_minors(board, chess.BLACK),
-        },
-        "center_control": {
-            "white": center_control(board, chess.WHITE),
-            "black": center_control(board, chess.BLACK),
-        },
+        "developed_minors": _both(developed_minors, board),
+        "center_control": _both(center_control, board),
     }
 
 
@@ -246,6 +394,7 @@ def positional_changes(before: chess.Board, after: chess.Board) -> list[str]:
     differences, never a judgement the engine didn't make.
     """
     changes: list[str] = []
+    mob_before, mob_after = mobility(before), mobility(after)
     for color in (chess.WHITE, chess.BLACK):
         name = _color_name(color)
         if has_bishop_pair(before, color) and not has_bishop_pair(after, color):
@@ -258,17 +407,65 @@ def positional_changes(before: chess.Board, after: chess.Board) -> list[str]:
         new_iso = set(isolated_pawns(after, color)) - set(isolated_pawns(before, color))
         for sq in sorted(new_iso):
             changes.append(f"{name} now has an isolated pawn on {sq}")
+        new_backward = set(backward_pawns(after, color)) - set(backward_pawns(before, color))
+        for sq in sorted(new_backward):
+            changes.append(f"{name} now has a backward pawn on {sq}")
         new_passed = set(passed_pawns(after, color)) - set(passed_pawns(before, color))
         for sq in sorted(new_passed):
             changes.append(f"{name} now has a passed pawn on {sq}")
-        ks_before = king_safety(before, color)["squares_attacked_near_king"]
-        ks_after = king_safety(after, color)["squares_attacked_near_king"]
-        if ks_after - ks_before >= 2:
+        ks_before = king_safety(before, color)
+        ks_after = king_safety(after, color)
+        if ks_after["squares_attacked_near_king"] - ks_before["squares_attacked_near_king"] >= 2:
             changes.append(f"{name}'s king is more exposed (more squares attacked near it)")
+        # A lost shield pawn is a concrete, common reason a quiet-looking move hurts —
+        # but only report it when the king itself stayed put, so castling and king
+        # moves (which legitimately change the shield) don't read as a weakening.
+        if (
+            ks_before["king_square"] == ks_after["king_square"]
+            and ks_after["shield_pawns"] < ks_before["shield_pawns"]
+        ):
+            changes.append(f"{name}'s king lost a pawn from its shield")
         if developed_minors(after, color) > developed_minors(before, color):
             changes.append(f"{name} developed a piece")
-        if center_control(after, color) - center_control(before, color) >= 2:
+        center_delta = center_control(after, color) - center_control(before, color)
+        if center_delta >= 2:
             changes.append(f"{name} gained more control of the center")
+        elif center_delta <= -2:
+            changes.append(f"{name} gave up control of the center")
+        # Activity / coordination: a real drop in how many moves a side's pieces have
+        # is a true, grounded sign the pieces got more passive. The threshold is
+        # conservative (≥5 fewer AND a quarter fewer) so ordinary trades don't trip it.
+        before_n, after_n = mob_before.get(name), mob_after.get(name)
+        if (
+            before_n is not None
+            and after_n is not None
+            and before_n - after_n >= 5
+            and after_n <= before_n * 0.75
+        ):
+            changes.append(
+                f"{name}'s pieces have fewer active moves ({before_n} → {after_n})"
+            )
+        # Rook activity: a rook that gains an (semi-)open file it didn't control before.
+        rof_before, rof_after = rooks_on_open_files(before, color), rooks_on_open_files(after, color)
+        for file_letter, kind in rof_after.items():
+            if rof_before.get(file_letter) != kind:
+                changes.append(f"{name}'s rook now controls the {kind} {file_letter}-file")
+        # Knight outpost gained or lost (by net count, so a knight relocating doesn't lie).
+        out_before, out_after = set(knight_outposts(before, color)), set(knight_outposts(after, color))
+        if len(out_after) > len(out_before):
+            sq = sorted(out_after - out_before)[0]
+            changes.append(f"{name} planted a knight on a strong outpost ({sq})")
+        elif len(out_after) < len(out_before):
+            sq = sorted(out_before - out_after)[0]
+            changes.append(f"{name}'s knight lost its outpost ({sq})")
+        # A piece the move leaves trapped (assessable only for the side to move, which
+        # both boards share in normal use — the mover after their move + the reply).
+        if color == before.turn == after.turn:
+            new_trapped = set(trapped_pieces(after, color)) - set(trapped_pieces(before, color))
+            for sq in sorted(new_trapped):
+                piece = after.piece_at(chess.parse_square(sq))
+                pname = chess.piece_name(piece.piece_type) if piece else "piece"
+                changes.append(f"{name}'s {pname} on {sq} is trapped (no safe square)")
     return changes
 
 

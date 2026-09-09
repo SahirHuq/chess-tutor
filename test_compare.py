@@ -91,6 +91,24 @@ def test_compare_moves_picks_the_mate():
 
 
 @needs_engine
+def test_explain_position_returns_full_grounded_snapshot():
+    session = _session("1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 1-0")
+    session.goto_move(4)  # after 1.e4 e5 2.Nf3 Nc6 — a real middlegame-ish position
+    with Engine() as engine:
+        tools.bind(session, engine)
+        result = tools.explain_position()
+    # Engine verdict + best plan, material facts, and the full positional character.
+    assert result["engine"]["best_moves"]  # the engine's ranked moves are present
+    assert "material" in result["facts"] and "hanging_pieces" in result["facts"]
+    feats = result["features"]
+    for key in ("bishop_pair", "backward_pawns", "rooks_on_open_files",
+                "knight_outposts", "trapped_pieces", "mobility", "center_control"):
+        assert key in feats
+    # explain_position is read-only: the board it described is still where we left it.
+    assert session.orientation()["mainline_ply"] == 4
+
+
+@needs_engine
 def test_compare_moves_rejects_illegal_move():
     session = _session("1. e4 e5 0-1")
     session.goto_move(0)  # starting position

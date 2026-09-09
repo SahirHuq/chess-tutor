@@ -39,6 +39,18 @@ def test_find_eval_swings_is_registered_for_gemini():
     assert tools.find_eval_swings in tools.ALL_TOOLS
 
 
+def test_explain_position_is_registered_for_gemini():
+    assert tools.explain_position in tools.ALL_TOOLS
+
+
+def test_system_prompt_routes_conceptual_questions_to_explain_position():
+    game = chess.pgn.read_game(io.StringIO("1. e4 e5 1/2-1/2"))
+    assert game is not None
+    prompt = build_system_prompt(SessionState.from_game(game))
+    assert "call explain_position()" in prompt
+    assert "what are the imbalances?" in prompt
+
+
 # ---- player-aware prompt + colour selection -------------------------------
 
 
