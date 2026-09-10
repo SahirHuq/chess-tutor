@@ -1,6 +1,20 @@
 # Conversational AI Chess Tutor
 
-Review a chess game and ask why a move worked, where things went wrong, or what you could have played instead. Use the local browser app or the terminal interface to explore your PGN with Stockfish analysis and Gemini explanations.
+Understand **why a chess move is good or bad, the idea behind it, and how to think through similar positions**. Review your games through a conversation grounded in Stockfish analysis.
+
+## The problem
+
+When you review a game with a chess engine, you can see the best move, a suggested line, and an evaluation that changes after each move. Those outputs tell you which move the engine prefers and how the position is scored. On their own, they do not explain the reasoning in a way you can learn from.
+
+Seeing an evaluation drop tells you something went wrong. It leaves the questions that matter to a player unanswered: **Why was my move bad? What did I overlook? Why is the suggested move better, and what is the plan behind it?** A sequence of best moves can still leave you unsure what to look for next time.
+
+## What this project solves
+
+Conversational AI Chess Tutor adds the explanation and back-and-forth discussion to engine analysis. Load your game, ask about a decision, and explore the tactical or positional reasons behind it: what your move allowed, what an alternative achieves, and how those details connect to a broader plan.
+
+You can follow up with “Why?”, compare candidate moves, or ask “What if I had played this instead?” The aim is to help you build a better chess thinking process and carry the lesson into your next game.
+
+Use the local browser app or terminal interface to review your PGN with Stockfish analysis and Gemini explanations.
 
 The project separates chess analysis from conversation: **Stockfish evaluates positions, python-chess validates moves, and Gemini explains the returned facts.** Hypothetical lines run on copies of the board, preserving the original game.
 
