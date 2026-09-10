@@ -4,6 +4,10 @@ Review a chess game and ask why a move worked, where things went wrong, or what 
 
 The project separates chess analysis from conversation: **Stockfish evaluates positions, python-chess validates moves, and Gemini explains the returned facts.** Hypothetical lines run on copies of the board, preserving the original game.
 
+![Chess Tutor browser interface showing the chessboard, move list, and a conversation about the sample game's 9.Nxd4 blunder](docs/images/chess-tutor-screenshot.jpg)
+
+*Review a game with move navigation and conversational feedback in the local web app.*
+
 ## Features
 
 - **Interactive game review:** load a PGN export or the included sample game, choose your side, and navigate the moves.
