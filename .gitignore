@@ -27,4 +27,13 @@ secrets/
 # Machine-specific files
 .DS_Store
 *.log
-.claude/settings.local.json
+
+# Local coding-agent configuration and instructions
+.claude/
+.spec-workflow/
+.codex/
+.agents/
+CLAUDE.md
+claude.md
+AGENTS.md
+agents.md
