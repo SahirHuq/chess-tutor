@@ -2,11 +2,13 @@
 
 Usage:
     GEMINI_API_KEY=...  .venv/bin/python tutor.py [game.pgn]
+    GEMINI_MODEL=...    optional: a stronger Gemini model than the default
 
-The model (Gemini 2.5 Flash-Lite) reaches the engine ONLY through the tools in
-`tools.py`, under a system prompt that forbids talking about anything a tool
-didn't return — so it can't hallucinate chess. The `GeminiTutor` adapter is the
-single place that knows about the provider; swap it to change models.
+The model reaches the engine ONLY through the tools in `tools.py`, under a system
+prompt that forbids talking about anything a tool didn't return — and every answer
+is checked afterwards: a move the tools never returned sends the answer back for a
+rewrite. The `GeminiTutor` adapter is the single place that knows about the
+provider; swap it to change models.
 """
 
 from __future__ import annotations
@@ -14,9 +16,10 @@ from __future__ import annotations
 import argparse
 import io
 import os
+import re
 import sys
 import time
-from typing import Optional
+from typing import Iterable, Optional
 
 import chess.pgn
 
@@ -24,7 +27,70 @@ import tools
 from engine import Engine, EngineError
 from session import SessionState
 
-MODEL = "gemini-2.5-flash-lite"
+# Chosen from a live comparison: gemini-2.5-flash-lite skipped the probes and misread
+# the board, while this model investigated (square_info, threats) and got every fact
+# right. It is slower (~45s vs ~8s on an investigated answer). Set GEMINI_MODEL to
+# any other model your key can use.
+DEFAULT_MODEL = "gemini-3.8-flash"
+
+
+def configured_model() -> str:
+    """The Gemini model to use: $GEMINI_MODEL when set, else DEFAULT_MODEL."""
+    return os.environ.get("GEMINI_MODEL", "").strip() or DEFAULT_MODEL
+
+
+# ---- the claim check: every move the answer names must come from a tool ------
+#
+# The prompt *asks* the model to stay grounded; this *checks* it. We pull every move
+# written in the answer and compare it with the moves the tools returned (plus the
+# game's own moves and the user's question). Plain pawn pushes like "e4" are skipped
+# on purpose: in prose they are indistinguishable from square names ("the pawn on
+# e4"), and a false alarm would make the tutor rewrite correct answers.
+_MOVE_MENTION = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"(O-O-O|O-O|[KQRBN][a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?|[a-h]x[a-h][1-8](?:=[QRBN])?|[a-h][18]=[QRBN])"
+    r"[+#]?(?![A-Za-z0-9])"
+)
+
+
+def _move_key(san: str) -> str:
+    """Reduce a move to piece + destination (+ promotion) so harmless spelling
+    differences — "Nbd2" vs "Nd2", "Nxe5" vs "Ne5", a missing "+" — still match."""
+    if san.startswith("O-O"):
+        return san
+    dest = re.findall(r"[a-h][1-8]", san)[-1]
+    promo = san.split("=")[1] if "=" in san else ""
+    # The piece letter — or, for a pawn capture/promotion, the file it came from.
+    return f"{san[0]}{dest}{promo}"
+
+
+def move_mentions(text: str) -> dict[str, str]:
+    """Moves written in `text`, as {key: the move as written} (first spelling wins)."""
+    found: dict[str, str] = {}
+    for match in _MOVE_MENTION.finditer(text):
+        found.setdefault(_move_key(match.group(1)), match.group(1))
+    return found
+
+
+def _strings_in(value: object) -> Iterable[str]:
+    """Every string inside a tool result (keys and values, at any depth). Scanning
+    the raw strings — not a JSON dump — keeps escapes like "\\n" from gluing a letter
+    onto a move and hiding it from the move pattern."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _strings_in(key)
+            yield from _strings_in(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _strings_in(item)
+
+
+def unverified_moves(answer: str, grounded: Iterable[str]) -> list[str]:
+    """Moves the answer names that no tool, game move, or user question supplied."""
+    known = set(grounded)
+    return [written for key, written in move_mentions(answer).items() if key not in known]
 
 SYSTEM_TEMPLATE = """\
 You are a friendly chess tutor reviewing THIS game with a player who is still \
@@ -94,6 +160,29 @@ weaknesses, open files, knight outposts, trapped pieces, king safety, activity, 
 REASON over ALL of it to teach — connect the facts into a plan or an explanation, even \
 for ideas no single field names — but keep every concrete claim (a move, an eval, a \
 square, a piece) grounded in what it returned; never invent one.
+- INVESTIGATE like a coach when the named fields don't explain a move — e.g. \
+explain_move's `tactics` and `position_changes` are empty but it lost material or a \
+lot of evaluation, or the user asks "but WHY?". Form a hypothesis about the idea, then \
+CHECK it with the probes before you say it. explain_move leaves the board on the \
+position just BEFORE the move, so you can probe there directly:
+  · try_line("Nxe5 Qxe5 Rxd8+") — walks a line from the current board (without \
+moving it) and reports after EACH move what it captures and attacks, whether it \
+checks, and what is left hanging. Walk the played move followed by the moves in \
+`consequence` to find the exact moment material falls.
+  · square_info("e5") — who attacks and defends a square (each marked \
+`pinned_to_king`), what the piece there attacks and `defends`, and whether it is \
+attacked by a cheaper piece. Use it to test an overloaded defender (one piece whose \
+`defends` covers two attacked things), a pinned defender that can't really recapture, \
+or a piece attacked by a cheaper piece.
+  · threats() — what the opponent would play if it were their move now. Use it for \
+"what did I miss?" or when a quiet move lost because it ignored a threat; if its \
+`serious` is false, say there was no real threat.
+  When the probe results show it, NAME the idea — overloaded defender, removing the \
+defender, discovered attack, skewer, back-rank weakness, piece attacked by a cheaper \
+piece, ignored threat — and walk through the moves that prove it. Name an idea ONLY \
+when the probes confirm it, and mention only moves, squares and pieces a tool \
+returned. Probes never change the verdict: keep explain_move's `verdict` and \
+`centipawns_lost`.
 
 explain_move works for ANY move and gives you everything to TEACH, not just \
 label. Your job is to help the player understand and improve. Structure each \
@@ -138,14 +227,18 @@ bishop pair") over generic advice (e.g. "be careful when trading"). This is the 
 part that improves their thinking.
 
 Material: respect `consequence`'s NET result — if material stays even it is a \
-trade or a positional point, never a material "win". Evaluations are White's \
-point of view: positive favors White, negative favors Black.
+trade or a positional point, never a material "win". If a line's `ends_mid_exchange` \
+is true, the net is NOT final: don't quote it as a win — walk the exchange with \
+try_line instead. Evaluations are White's point of view: positive favors White, \
+negative favors Black.
 
 HONESTY OVER FABRICATION: use only facts the tools returned. Never invent \
 positional reasons (no guessing about "activity", "weak squares", "a more active \
 queen"), never state a piece's square, a recapture, or a positional claim the \
 tools did not report, and never say a move attacks or defends a piece that is not \
-in that move's `attacks`/`captures` list — if you catch yourself guessing, stop. \
+in that move's `attacks`/`captures` list or a probe's `attacks`/`defends`/\
+`attacked_by`/`defended_by` result — if you catch yourself guessing, stop, and probe \
+instead. \
 When the grounded reasons are thin (empty `position_changes` and `achieves`, even \
 material), let `centipawns_lost` decide HOW you describe it — do NOT let thin \
 reasons push you into softening the verdict: \
@@ -173,17 +266,37 @@ class GeminiTutor:
     instead of crashing, transient 5xx errors are retried, and we can nudge the
     model when it returns an empty answer after a tool call. This is the ONLY
     module that knows the provider — reimplement it to swap models.
+
+    After the model answers, `ask` checks every move it names against the moves the
+    tools have returned in this conversation (plus the game's moves and the user's
+    own words). An unverified move sends the answer back ONCE for a rewrite; if it
+    survives that, the answer carries a visible caution instead of passing silently.
+    `client` is injectable so this loop can be tested without the network.
     """
 
-    MAX_TOOL_ROUNDS = 8
+    # Investigating (explain_move, then try_line / square_info / threats) takes more
+    # rounds than the old fixed-verdict flow; the cap still stops a looping model.
+    MAX_TOOL_ROUNDS = 12
 
-    def __init__(self, system_instruction: str, tool_fns: list, api_key: str) -> None:
-        from google import genai
+    def __init__(
+        self,
+        system_instruction: str,
+        tool_fns: list,
+        api_key: str,
+        known_moves: Iterable[str] = (),
+        model: Optional[str] = None,
+        client=None,
+    ) -> None:
         from google.genai import errors, types
 
+        if client is None:
+            from google import genai
+
+            client = genai.Client(api_key=api_key)
         self._types = types
         self._errors = errors
-        self._client = genai.Client(api_key=api_key)
+        self._client = client
+        self._model = model or configured_model()
         self._tools = {fn.__name__: fn for fn in tool_fns}
         self._config = types.GenerateContentConfig(
             system_instruction=system_instruction,
@@ -191,12 +304,40 @@ class GeminiTutor:
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
         self._contents: list = []  # full conversation, grows across turns
+        # Move keys the answer may name: the game's own moves, then everything the
+        # tools return and the user writes, accumulated across the conversation.
+        self._grounded: set[str] = set()
+        for san in known_moves:
+            self._grounded.update(move_mentions(san))
 
     def ask(self, question: str) -> str:
-        types = self._types
-        self._contents.append(
-            types.Content(role="user", parts=[types.Part.from_text(text=question)])
+        self._grounded.update(move_mentions(question))
+        self._append_user(question)
+        answer = self._answer_with_tools()
+        unverified = unverified_moves(answer, self._grounded)
+        if not unverified:
+            return answer
+        self._append_user(
+            "Check your answer: it mentions " + ", ".join(unverified) + ", which no tool "
+            "returned in this conversation. Either call a tool that confirms them, or "
+            "rewrite the answer without them. Only state facts the tools returned."
         )
+        answer = self._answer_with_tools()
+        still_unverified = unverified_moves(answer, self._grounded)
+        if still_unverified:
+            answer += (
+                "\n\n(Caution: " + ", ".join(still_unverified) + " did not come from the "
+                "engine tools — treat those moves with suspicion.)"
+            )
+        return answer
+
+    def _append_user(self, text: str) -> None:
+        types = self._types
+        self._contents.append(types.Content(role="user", parts=[types.Part.from_text(text=text)]))
+
+    def _answer_with_tools(self) -> str:
+        """Let the model call tools until it produces a text answer (or hits the cap)."""
+        types = self._types
         for _ in range(self.MAX_TOOL_ROUNDS):
             response = self._generate()
             content = response.candidates[0].content
@@ -215,7 +356,7 @@ class GeminiTutor:
         for attempt in range(4):
             try:
                 return self._client.models.generate_content(
-                    model=MODEL, contents=self._contents, config=self._config
+                    model=self._model, contents=self._contents, config=self._config
                 )
             except self._errors.ClientError as exc:  # 4xx — don't blind-retry
                 if getattr(exc, "code", None) == 429:
@@ -243,6 +384,9 @@ class GeminiTutor:
                     result = fn(**args)
                 except Exception as exc:  # report tool errors to the model, don't crash
                     result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            # Whatever a tool returned is grounded — the answer may name these moves.
+            for text in _strings_in(result):
+                self._grounded.update(move_mentions(text))
             parts.append(
                 types.Part.from_function_response(name=call.name, response={"result": result})
             )
@@ -486,7 +630,10 @@ def main() -> None:
     try:
         with Engine() as engine:
             tools.bind(session, engine)
-            tutor = GeminiTutor(build_system_prompt(session), tools.ALL_TOOLS, api_key)
+            tutor = GeminiTutor(
+                build_system_prompt(session), tools.ALL_TOOLS, api_key,
+                known_moves=session.mainline_san,
+            )
             repl(tutor, session)
     except EngineError as exc:
         raise SystemExit(str(exc))

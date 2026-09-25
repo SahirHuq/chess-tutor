@@ -110,6 +110,42 @@ def test_annotate_line_reports_attacks():
     assert first["attacks"] == ["bishop on g4"]
 
 
+# A black knight on e5, defended by the d6 pawn, attacked by White's f4 pawn.
+_KNIGHT_FOR_PAWN = "r1bqkb1r/ppp2ppp/3p1n2/4n3/4PP2/2N5/PPP3PP/R1BQKBNR w KQkq - 0 6"
+
+
+def _line(fen: str, sans: list[str]) -> dict:
+    from features import annotate_line
+
+    board = chess.Board(fen)
+    work, moves = board.copy(), []
+    for san in sans:
+        moves.append(work.parse_san(san))
+        work.push(moves[-1])
+    return annotate_line(board, moves, max_plies=len(moves))
+
+
+def test_annotate_line_counts_a_knight_for_a_pawn_as_material_not_a_trade():
+    line = _line(_KNIGHT_FOR_PAWN, ["fxe5", "dxe5"])
+    assert line["material_swing_white_minus_black"] == 2
+    assert "White ends up 2 points of material ahead" in line["summary"]
+    assert "equal trade" not in line["summary"]
+    assert line["ends_mid_exchange"] is False  # nothing White can recapture on e5
+
+
+def test_annotate_line_flags_a_line_cut_off_mid_exchange():
+    line = _line(_KNIGHT_FOR_PAWN, ["fxe5"])  # d6xe5 is still to come
+    assert line["ends_mid_exchange"] is True
+    assert "exchange may not be finished" in line["summary"]
+
+
+def test_annotate_line_quiet_line_stays_even():
+    line = _line(_KNIGHT_FOR_PAWN, ["Nf3"])
+    assert line["material_swing_white_minus_black"] == 0
+    assert "material stays even" in line["summary"]
+    assert line["ends_mid_exchange"] is False
+
+
 def test_positional_changes_bishop_pair_and_doubled():
     before = chess.Board("k7/5pp1/8/8/8/8/5PP1/K1B2B2 w - - 0 1")  # 2 white bishops; f7,g7
     after = chess.Board("k7/5p2/5p2/8/8/8/5PP1/K1B5 w - - 0 1")  # 1 bishop; f7,f6 doubled

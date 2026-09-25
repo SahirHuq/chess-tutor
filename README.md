@@ -116,7 +116,7 @@ Try asking:
 | `CHESS_WEB_HOST` | Web server bind address | `127.0.0.1` |
 | `CHESS_WEB_PORT` | Web server port | `8000` |
 
-The model is set to `gemini-2.5-flash-lite` in `tutor.py`. Engine defaults in `engine.py` are depth 18, three candidate lines, and up to eight half-moves displayed per principal variation. Whole-game reviews can take longer because they evaluate multiple positions.
+The model defaults to `gemini-3.8-flash`, which reliably uses the probe tools to investigate positions; answers that need investigation can take 30–60 seconds. Set `GEMINI_MODEL` to use another Gemini model your key can access. Engine defaults in `engine.py` are depth 18, three candidate lines, and up to eight half-moves displayed per principal variation. Whole-game reviews can take longer because they evaluate multiple positions.
 
 ## How it works
 

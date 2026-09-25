@@ -293,8 +293,10 @@ def _evaluate_candidate(
     # with captures and the NET material change measured from BEFORE the move — so a
     # capture that gets recaptured nets to an even trade, not a phantom "win".
     best_reply = after_analysis.lines[0].moves if after_analysis.lines else []
+    # Annotate the WHOLE engine line (move + every reply ply): capping it shorter used
+    # to drop the final recapture and report half an exchange as a huge material win.
     consequence = features.annotate_line(
-        before_board, [move] + list(best_reply), max_plies=8
+        before_board, [move] + list(best_reply), max_plies=1 + len(best_reply)
     )
     # What the move changed positionally (move + best reply, so a trade's effect —
     # e.g. losing the bishop pair after the recapture — shows up).
@@ -727,8 +729,224 @@ def go_back() -> dict:
     return result
 
 
+# ---- probes: general questions the model asks to test its own hypotheses ------
+#
+# The verdict tools above hand the model pre-named reasons (fork, pin, bishop pair…),
+# which caps its explanations at the motifs we wrote detectors for. These probes are
+# the opposite: small, general, always-true questions about the board, so the model
+# can investigate like a coach (form a hypothesis, check it) and name ideas we never
+# hand-coded — without ever stating a fact a tool didn't return. None of them moves
+# the board: they read `session.current` and leave it where it was.
+
+_MAX_LINE_PLIES = 10  # long enough for a real combination, short enough to stay precise
+_SERIOUS_THREAT_CP = 100  # a threat worth about a pawn or more is worth teaching
+
+
+def _parse_line(board: chess.Board, text: str) -> tuple[list[chess.Move], Optional[str]]:
+    """Parse a space-separated line ("12.Nxe5 Qxe5 13.Rxd8+") into moves legal in
+    sequence from `board`. Returns (moves, None) or ([], error) — the first illegal
+    move is named with its position in the line so the model can't build on it."""
+    tokens = [t for t in re.split(r"[\s,]+", text.strip()) if t]
+    tokens = [t for t in tokens if not re.fullmatch(r"\d+\.+", t)]  # bare "12." / "12..."
+    if not tokens:
+        return [], "no moves given — pass a line like 'Nxe5 Qxe5 Rxd8+'"
+    if len(tokens) > _MAX_LINE_PLIES:
+        return [], f"that line has {len(tokens)} half-moves — give at most {_MAX_LINE_PLIES}"
+    work = board.copy()
+    moves: list[chess.Move] = []
+    for index, token in enumerate(tokens, start=1):
+        text_move = _normalize_san(token)
+        move = None
+        for parse in (work.parse_san, work.parse_uci):
+            try:
+                candidate = parse(text_move)
+            except ValueError:  # python-chess's illegal/invalid/ambiguous errors
+                continue
+            if candidate in work.legal_moves:
+                move = candidate
+                break
+        if move is None:
+            side = "white" if work.turn else "black"
+            return [], (
+                f"illegal: move {index} of the line, '{token}', is not legal there "
+                f"(side to move: {side}) — nothing after it was played"
+            )
+        moves.append(move)
+        work.push(move)
+    return moves, None
+
+
+def _walk_line(board: chess.Board, moves: list[chess.Move]) -> dict:
+    """`annotate_line` plus what is left hanging and whether it is mate after EACH
+    move — so the model can point at the exact ply where material falls instead of
+    only the net result."""
+    walked = features.annotate_line(board, moves, max_plies=len(moves))
+    work = board.copy()
+    for step, move in zip(walked["moves"], moves):
+        work.push(move)
+        step["hanging_after"] = features.hanging_pieces(work)
+        step["checkmate"] = work.is_checkmate()
+    return walked
+
+
+def _cached_analysis(board: chess.Board) -> dict:
+    """Engine verdict on `board`, reusing the session cache (analysis is the slow part)."""
+    ctx = _ctx()
+    fen = board.fen()
+    analysis = ctx.session.analysis_cache.get(fen)
+    if analysis is None:
+        analysis = ctx.engine.analyse(board).to_dict()
+        ctx.session.analysis_cache[fen] = analysis
+    return analysis
+
+
+def square_info(square: str) -> dict:
+    """Probe ONE square on the CURRENT board — your magnifying glass for testing an
+    idea before you say it. `square` is like "e5".
+
+    Returns the piece on it (if any) and: `attacked_by` and `defended_by` (every piece
+    that directly hits the square, each marked `pinned_to_king` — a pinned piece can't
+    really capture or recapture), `attacks` (enemy pieces this piece hits), `defends`
+    (its own pieces this piece protects), `pinned_to_king`, and
+    `attacked_by_cheaper_piece` (it loses material even if defended). For an empty
+    square you get `attacked_by_white` / `attacked_by_black`.
+
+    Use it to CHECK hypotheses: an overloaded defender (one piece in `defends` for two
+    things that are both attacked), a defender that is pinned, a piece attacked by a
+    cheaper piece, a square the opponent controls. Only claim what it returns.
+    """
+    ctx = _ctx()
+    try:
+        parsed = chess.parse_square(square.strip().lower())
+    except ValueError:
+        result = {"ok": False, "error": f"'{square}' is not a square — use a name like 'e5'."}
+        _log(f"square_info({square!r}) -> {result['error']}")
+        return result
+    report = features.square_report(ctx.session.current, parsed)
+    occupant = report["piece"]
+    label = f"{occupant['color']} {occupant['type']}" if occupant else "empty"
+    _log(f"square_info({report['square']}) -> {label}")
+    return {"ok": True, "position": ctx.session.orientation(), **report}
+
+
+def try_line(moves: str) -> dict:
+    """Walk a sequence of moves from the CURRENT position WITHOUT moving the board,
+    and see exactly what happens at every step. `moves` is a space-separated line in
+    algebraic notation, e.g. "Nxe5 Qxe5 Rxd8+" (move numbers are fine; at most 10).
+
+    Returns `line.moves`: for EACH move — who played it, what it `captures`, which
+    pieces it `attacks`, whether it `gives_check`, `hanging_after` (pieces left
+    attacked and undefended after that move), and `checkmate` — plus the net material
+    result, and `engine_after_line` (the evaluation where the line ends). If any move
+    is illegal you get ok=false naming it; do NOT describe the line past that point.
+
+    Use it to walk the engine's line (e.g. the played move followed by the moves in
+    `consequence`) and find the precise moment material falls or a threat appears, or
+    to test "what if they had played X here?" in more than one move.
+    """
+    ctx = _ctx()
+    board = ctx.session.current
+    parsed, error = _parse_line(board, moves)
+    if error:
+        result = {"ok": False, "error": error}
+        _log(f"try_line({moves!r}) -> {error}")
+        return result
+    walked = _walk_line(board, parsed)
+    end = board.copy()
+    for move in parsed:
+        end.push(move)
+    analysis = _cached_analysis(end)
+    _log(f"try_line({moves!r}) -> {walked['summary']} | {_eval_summary(analysis)}")
+    return {
+        "ok": True,
+        "position": ctx.session.orientation(),
+        "line": walked,
+        "engine_after_line": analysis,
+        "facts_after_line": features.position_facts(end),
+    }
+
+
+def threats() -> dict:
+    """What is the opponent THREATENING in the CURRENT position? Answers "what would
+    they play if it were their move right now?" by letting the side to move pass.
+
+    Returns `threat.move` (the opponent's best move if ignored), `threat.line` (that
+    line annotated with captures / attacks / checks), `threat.tactics` (a fork, pin or
+    hung piece it creates), `threat.eval_if_ignored`, `threat.threatens_mate` (with
+    `mate_in`), and `threat.size_centipawns` — how much the opponent gains if the
+    threat is ignored (empty for a mate threat) — with `threat.serious` (true for a
+    mate threat or a gain of about a pawn or more). `current_engine` is the real
+    evaluation.
+
+    Use it for "what did I miss?", "why did I have to defend there?", or when a quiet
+    move lost because it ignored something. If `serious` is false, say there was no
+    real threat rather than inventing one. Not available while in check (the check
+    IS the threat) — call analyze() then.
+    """
+    ctx = _ctx()
+    board = ctx.session.current
+    side = "white" if board.turn else "black"
+    opponent = "black" if board.turn else "white"
+    if board.is_game_over(claim_draw=True):
+        result = {"ok": False, "error": "the game is over in this position — there is no threat to find."}
+        _log(f"threats() -> {result['error']}")
+        return result
+    if board.is_check():
+        result = {
+            "ok": False,
+            "error": f"{side} is in check — the check itself is the threat; call analyze() instead.",
+        }
+        _log(f"threats() -> {result['error']}")
+        return result
+
+    current = _cached_analysis(board)
+    # A "null move" hands the turn to the opponent without changing the board — the
+    # standard engine trick for asking what they want to do. Legal here because the
+    # side to move is not in check, so the resulting position is valid. We rebuild it
+    # from the FEN so the engine gets a clean position with no null move in its history.
+    passed_with_history = board.copy(stack=False)
+    passed_with_history.push(chess.Move.null())
+    passed = chess.Board(passed_with_history.fen())
+    passed_analysis = ctx.engine.analyse(passed)
+    if not passed_analysis.lines or not passed_analysis.lines[0].moves:
+        result = {"ok": False, "error": f"the engine found no move for {opponent} here — no threat to report."}
+        _log(f"threats() -> {result['error']}")
+        return result
+    top = passed_analysis.lines[0]
+    top_dict = top.to_dict()
+    threatens_mate = top.mate_in is not None and (top.mate_in > 0) == (opponent == "white")
+    value_now = _white_value(current["best_moves"])
+    value_ignored = _white_value([top_dict])
+    size = None
+    # A mate threat has no honest centipawn size (mate and centipawns share one scale,
+    # so the difference would read as ~100000) — report `mate_in` and leave size empty.
+    mate_involved = any(v is not None and abs(v) >= _MATE_VALUE for v in (value_now, value_ignored))
+    if not mate_involved and value_now is not None and value_ignored is not None:
+        gain = (value_ignored - value_now) if opponent == "white" else (value_now - value_ignored)
+        size = max(int(gain), 0)
+    serious = threatens_mate or (size is not None and size >= _SERIOUS_THREAT_CP)
+    _log(f"threats() -> {opponent} threatens {top.move} ({top_dict['eval']}, size={size}, serious={serious})")
+    return {
+        "ok": True,
+        "position": ctx.session.orientation(),
+        "threatening_side": opponent,
+        "threat": {
+            "move": top.move,
+            "line": features.annotate_line(passed, top.moves, max_plies=6),
+            "tactics": tactics.move_tactics(passed, top.moves[0]),
+            "eval_if_ignored": top_dict["eval"],
+            "mate_in": top.mate_in,
+            "threatens_mate": threatens_mate,
+            "size_centipawns": size,
+            "serious": serious,
+        },
+        "current_engine": current,
+    }
+
+
 # The exact list handed to google-genai as `config.tools`.
 ALL_TOOLS = [
     explain_move, compare_moves, find_eval_swings, explain_position,
     goto_move, analyze, play_move, go_back,
+    square_info, try_line, threats,
 ]

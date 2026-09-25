@@ -119,7 +119,8 @@ class ReviewApp:
             if self._tutor is None:
                 try:
                     self._tutor = tutor.GeminiTutor(
-                        tutor.build_system_prompt(self.session), tools.ALL_TOOLS, self.api_key
+                        tutor.build_system_prompt(self.session), tools.ALL_TOOLS, self.api_key,
+                        known_moves=self.session.mainline_san,
                     )
                 except Exception as exc:  # bad key / import / client init — report, don't crash
                     return {"ok": False, "error": f"Couldn't start the tutor: {exc}"}

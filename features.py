@@ -530,12 +530,25 @@ def annotate_line(board: chess.Board, moves: list[chess.Move], max_plies: int = 
         )
     else:
         sequence = "no captures"
-    if swing <= -3:
-        outcome = f"Black ends up about {abs(swing)} points of material ahead"
-    elif swing >= 3:
-        outcome = f"White ends up about {swing} points of material ahead"
+    # Any swing is real material: a knight for a pawn is +2, not "an equal trade".
+    if swing:
+        leader = "White" if swing > 0 else "Black"
+        points = abs(swing)
+        outcome = f"{leader} ends up {points} point{'s' if points != 1 else ''} of material ahead"
     else:
         outcome = "material stays even (an equal trade)"
+    # A line cut off right after a capture that can be recaptured reports a net result
+    # the exchange hasn't finished yet — say so rather than let a half-trade read as a win.
+    ends_mid_exchange = bool(
+        annotated
+        and annotated[-1]["captures"]
+        and work.is_attacked_by(work.turn, moves[len(annotated) - 1].to_square)
+    )
+    if ends_mid_exchange:
+        outcome += (
+            " — but the line stops right after a capture that can be recaptured, "
+            "so the exchange may not be finished"
+        )
     # A ready-to-relay, factual sentence so the model needn't infer any geometry.
     summary = f"The line goes: {sequence}. Net material: {outcome}."
 
@@ -545,6 +558,74 @@ def annotate_line(board: chess.Board, moves: list[chess.Move], max_plies: int = 
         "material_before": before,
         "material_after": after,
         "material_swing_white_minus_black": swing,
+        "ends_mid_exchange": ends_mid_exchange,
+    }
+
+
+def _square_occupant(board: chess.Board, square: int) -> dict:
+    """One piece as a probe reports it. `pinned_to_king` matters for the reader:
+    a pinned piece still *attacks* geometrically but can't legally capture, so a
+    'defender' that is pinned is not really defending."""
+    piece = board.piece_at(square)
+    assert piece is not None
+    return {
+        "piece": chess.piece_name(piece.piece_type),
+        "square": chess.square_name(square),
+        "color": _color_name(piece.color),
+        "pinned_to_king": piece.piece_type != chess.KING and board.is_pinned(piece.color, square),
+    }
+
+
+def square_report(board: chess.Board, square: int) -> dict:
+    """Everything true about one square — the model's magnifying glass.
+
+    The named detectors (forks, pins, hanging pieces, …) only cover the patterns
+    someone wrote a rule for. This probe is deliberately *general*: it reports who
+    attacks and defends a square, and what the piece standing there attacks and
+    protects, so the model can test its own hypotheses ("is this defender
+    overloaded?", "can that recapture really happen?") against facts instead of
+    being limited to our list of named motifs. Attacks are direct lines only (no
+    x-rays), and every entry is python-chess geometry, so nothing here is a guess.
+    """
+    name = chess.square_name(square)
+    piece = board.piece_at(square)
+    if piece is None:
+        return {
+            "square": name,
+            "piece": None,
+            "attacked_by_white": [_square_occupant(board, s) for s in sorted(board.attackers(chess.WHITE, square))],
+            "attacked_by_black": [_square_occupant(board, s) for s in sorted(board.attackers(chess.BLACK, square))],
+        }
+
+    own, enemy = piece.color, not piece.color
+    attacker_squares = sorted(board.attackers(enemy, square))
+    value = PIECE_VALUES.get(piece.piece_type)  # None for the king (it can't be traded)
+    # Being hit by a cheaper piece loses material even when defended — the case the
+    # strict "attacked and undefended" hanging check deliberately does not cover.
+    cheaper_attackers = [
+        s for s in attacker_squares
+        if value is not None and PIECE_VALUES.get(board.piece_type_at(s), 0) < value
+        and board.piece_type_at(s) != chess.KING
+    ]
+    attacks: list[dict] = []
+    defends: list[dict] = []
+    for target in sorted(board.attacks(square)):
+        other = board.piece_at(target)
+        if other is None:
+            continue
+        if other.color == enemy:
+            attacks.append(_square_occupant(board, target))
+        elif other.piece_type != chess.KING:  # "defending your own king" is not a job
+            defends.append(_square_occupant(board, target))
+    return {
+        "square": name,
+        "piece": {"type": chess.piece_name(piece.piece_type), "color": _color_name(own)},
+        "pinned_to_king": piece.piece_type != chess.KING and board.is_pinned(own, square),
+        "attacked_by": [_square_occupant(board, s) for s in attacker_squares],
+        "defended_by": [_square_occupant(board, s) for s in sorted(board.attackers(own, square))],
+        "attacked_by_cheaper_piece": bool(cheaper_attackers),
+        "attacks": attacks,
+        "defends": defends,
     }
 
 

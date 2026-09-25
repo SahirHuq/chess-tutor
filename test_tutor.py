@@ -1,10 +1,13 @@
 """Tests for the tutor prompt and adapter-adjacent behavior."""
 
 import io
+from types import SimpleNamespace
 
 import chess.pgn
+from google.genai import types
 
 import tools
+import tutor
 from session import SessionState
 from tutor import build_system_prompt, prompt_player_color
 
@@ -92,3 +95,125 @@ def test_prompt_player_color_skip_or_eof_returns_none():
         raise EOFError
 
     assert prompt_player_color(_session(_NAMED), ask=eof, show=quiet) is None
+
+
+# ---- investigation prompt ---------------------------------------------------
+
+
+def test_system_prompt_teaches_the_model_to_investigate_with_probes():
+    prompt = build_system_prompt(_session(_NAMED))
+    assert "INVESTIGATE like a coach" in prompt
+    for probe in ('try_line("', 'square_info("', "threats()"):
+        assert probe in prompt
+    assert "Name an idea ONLY" in prompt
+    assert "Probes never change the verdict" in prompt
+
+
+# ---- the claim check: moves in the answer must come from a tool ------------
+
+
+def test_move_mentions_finds_piece_moves_captures_castling_and_promotions():
+    text = "Nxe5 wins, then Qxe5 and O-O-O; exd5 and e8=Q too. The pawn on e4 is a square."
+    assert set(tutor.move_mentions(text).values()) == {"Nxe5", "Qxe5", "O-O-O", "exd5", "e8=Q"}
+
+
+def test_move_mentions_ignores_plain_pawn_pushes_and_words():
+    assert tutor.move_mentions("Play e4 on move 1 — Books and Queens are words.") == {}
+
+
+def test_unverified_moves_tolerates_spelling_differences():
+    grounded = set(tutor.move_mentions("Nbd2 Qxh5+"))
+    assert tutor.unverified_moves("Nd2 then Qh5 is fine.", grounded) == []
+    assert tutor.unverified_moves("Nd2, then Bb5+!", grounded) == ["Bb5"]
+
+
+def test_configured_model_defaults_and_reads_the_environment(monkeypatch):
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    assert tutor.configured_model() == tutor.DEFAULT_MODEL
+    monkeypatch.setenv("GEMINI_MODEL", "  some-stronger-model ")
+    assert tutor.configured_model() == "some-stronger-model"
+
+
+class _FakeGemini:
+    """Stands in for `genai.Client`: replays scripted model turns, records requests."""
+
+    def __init__(self, turns):
+        self._turns = list(turns)
+        self.requests = []
+        self.models = self
+
+    def generate_content(self, model, contents, config):
+        self.requests.append({"model": model, "contents": list(contents)})
+        return self._turns.pop(0)
+
+
+def _says(text):
+    content = types.Content(role="model", parts=[types.Part.from_text(text=text)])
+    return SimpleNamespace(candidates=[SimpleNamespace(content=content)], text=text)
+
+
+def _calls(name):
+    part = types.Part(function_call=types.FunctionCall(name=name, args={}))
+    content = types.Content(role="model", parts=[part])
+    return SimpleNamespace(candidates=[SimpleNamespace(content=content)], text=None)
+
+
+def _probe() -> dict:
+    """A stand-in tool that 'returns' Nxe5 from the engine."""
+    return {"ok": True, "best": "Nxe5"}
+
+
+def _tutor(turns, known_moves=()):
+    fake = _FakeGemini(turns)
+    adapter = tutor.GeminiTutor(
+        "system", [_probe], api_key="unused", known_moves=known_moves,
+        model="test-model", client=fake,
+    )
+    return adapter, fake
+
+
+def _last_user_text(fake):
+    last = fake.requests[-1]["contents"][-1]
+    return last.parts[0].text
+
+
+def test_answer_naming_only_tool_returned_moves_passes_unchanged():
+    adapter, fake = _tutor([_calls("_probe"), _says("Nxe5 wins a pawn.")])
+    assert adapter.ask("what's best?") == "Nxe5 wins a pawn."
+    assert len(fake.requests) == 2  # tool round + answer; no correction round
+    assert fake.requests[0]["model"] == "test-model"
+
+
+def test_game_moves_and_the_users_own_moves_count_as_grounded():
+    adapter, fake = _tutor([_says("Your Bc4 was fine, and Qh5 is legal.")], known_moves=["Bc4"])
+    assert adapter.ask("was Qh5 possible?") == "Your Bc4 was fine, and Qh5 is legal."
+    assert len(fake.requests) == 1
+
+
+def test_unverified_move_triggers_one_rewrite():
+    adapter, fake = _tutor([_says("Qh5 is the best move."), _says("The engine prefers Nxe5.")],
+                           known_moves=["Nxe5"])
+    assert adapter.ask("what's best?") == "The engine prefers Nxe5."
+    assert len(fake.requests) == 2
+    correction = _last_user_text(fake)
+    assert "Qh5" in correction and "no tool returned" in correction
+
+
+def test_unverified_move_that_survives_the_rewrite_gets_a_visible_caution():
+    adapter, _ = _tutor([_says("Qh5 is best."), _says("Still, Qh5 is best.")])
+    answer = adapter.ask("what's best?")
+    assert answer.startswith("Still, Qh5 is best.")
+    assert "Caution: Qh5 did not come from the engine tools" in answer
+
+
+def _nested_probe() -> dict:
+    """Returns a move after a newline, nested in a list — must still be grounded."""
+    return {"ok": True, "lines": [{"note": "engine line:\nNf3 then Bb5"}]}
+
+
+def test_moves_nested_or_after_newlines_in_tool_results_are_grounded():
+    fake = _FakeGemini([_calls("_nested_probe"), _says("Nf3 and then Bb5 is the plan.")])
+    adapter = tutor.GeminiTutor("system", [_nested_probe], api_key="unused",
+                                model="test-model", client=fake)
+    assert adapter.ask("plan?") == "Nf3 and then Bb5 is the plan."
+    assert len(fake.requests) == 2  # no correction round
